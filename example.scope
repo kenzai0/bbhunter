@@ -1,0 +1,21 @@
+# Ornek scope dosyasi.
+# Her satir bir kapsam girdisi. '#' yorum satiri.
+#
+# Formatlar:
+#   example.com          apex + tum subdomainler
+#   *.example.com        yalnizca subdomainler (apex haric)
+#   10.0.0.0/8           CIDR blogu
+#   192.168.1.5          tek IP
+#   !out.example.com     out-of-scope (basa '!'), veya [OUT] basligi altinda
+#
+# ONEMLI: Buraya YALNIZCA yetkili oldugun (programin kapsamindaki) hedefleri yaz.
+
+[IN]
+example.com
+*.example.com
+
+[OUT]
+# out-of-scope ornekleri - bunlara dokunulmaz
+blog.example.com
+legacy.example.com
+support.example.com

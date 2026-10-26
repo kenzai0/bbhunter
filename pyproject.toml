@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbhunter"
+version = "0.1.0"
+description = "Scope-first bug bounty recon & automation framework (authorized / in-scope targets only)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "KeNZai" }]
+keywords = ["bug-bounty", "recon", "security", "reconnaissance", "automation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Environment :: Console",
+]
+
+# Cekirdek bagimlilik. DNS ve YAML opsiyoneldir; yoksa kod otomatik fallback yapar.
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+# Tam ozellik seti: daha iyi DNS cozumleme + Nuclei YAML ice aktarma (tam dogruluk).
+full = [
+    "dnspython>=2.4.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+bbhunter = "bbhunter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kenzai0/bbhunter"
+Repository = "https://github.com/kenzai0/bbhunter"
+
+[tool.setuptools.packages.find]
+include = ["bbhunter*"]
+
+[tool.setuptools.package-data]
+# Yerlesik veriler saf Python modullerinde oldugu icin ekstra paket verisi yok.

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# bbhunter çıktıları — tarama sonuçları asla repoya girmez
+*_out/
+bbhunter_out/
+*.db
+*.sqlite
+*.log
+
+# Gerçek program kapsam dosyaları — yalnızca example.scope paylaşılır
+*.scope
+!example.scope
+
+# Araç / düzenleyici
+.claude/
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,10 @@
+# bbhunter bagimliliklari (minimum)
+requests>=2.31.0
+
+# Opsiyonel: daha iyi DNS (CNAME, custom resolver, wildcard tespiti).
+# Kurulu degilse socket tabanli cozumleyiciye otomatik duser.
+dnspython>=2.4.0
+
+# Opsiyonel: Nuclei YAML template ice aktarma (tam dogruluk).
+# Kurulu degilse sinirli yerlesik mini-parser devreye girer.
+pyyaml>=6.0
