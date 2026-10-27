@@ -144,7 +144,8 @@ class Scope:
         include: list[str] = []
         exclude: list[str] = []
         mode = "in"
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
+        # utf-8-sig: Windows araclarinin ( or. PowerShell Out-File) ekledigi BOM'u temizler
+        for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
