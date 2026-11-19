@@ -25,9 +25,28 @@ _SECRET_SIGS = [
     ("Stripe Live Key", re.compile(rb"\bsk_live_[0-9a-zA-Z]{24,}\b")),
     ("GitHub Token", re.compile(rb"\bgh[pousr]_[0-9A-Za-z]{36}\b")),
     ("JWT", re.compile(rb"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b")),
-    ("Private Key Block", re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
+    # Yalnizca baslik degil, ardindan gercek anahtar govdesi (base64) gelmeli.
+    # Kripto kutuphaneleri (oidc-client, jsrsasign, forge...) basligi PEM
+    # ayristirmak icin duz metin olarak icerir; bu yanlis alarmi eler.
+    ("Private Key Block", re.compile(
+        rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+        rb"(?:\\[rn]|\s)+[A-Za-z0-9+/=]{64}")),
     ("Generic api_key assignment", re.compile(rb"""['"]?api[_-]?key['"]?\s*[:=]\s*['"][0-9a-zA-Z\-_]{16,}['"]""", re.I)),
 ]
+
+
+# Imza basina varsayilan siddet. Herkese acik on yuz kodunda bulunmasi olagan
+# olan (Google API key, JWT) dusuk; dogrudan yetki veren sirlar yuksek.
+SECRET_SEVERITY = {
+    "AWS Access Key": "high",
+    "Google API Key": "low",
+    "Slack Token": "high",
+    "Stripe Live Key": "high",
+    "GitHub Token": "high",
+    "JWT": "low",
+    "Private Key Block": "high",
+    "Generic api_key assignment": "medium",
+}
 
 
 @dataclass

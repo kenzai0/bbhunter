@@ -9,6 +9,22 @@
 #   !out.example.com     out-of-scope (basa '!'), veya [OUT] basligi altinda
 #
 # ONEMLI: Buraya YALNIZCA yetkili oldugun (programin kapsamindaki) hedefleri yaz.
+#
+# Program kurallari ('@' satirlari) - arac bunlara KENDISI uyar:
+#   @rate 5          saniyede en fazla istek (CLI daha yuksek isterse indirilir)
+#   @threads 5       en fazla paralel is parcacigi
+#   @header A: b     her istege eklenecek zorunlu header
+#   @forbid x, y     yasak asamalar: brute ports fuzz probe vuln takeover js active
+#                    (active = hedefe istek atan her sey; yalnizca crt.sh/Wayback kalir)
+#   @program / @platform / @url / @note   bilgi (rapor ve ozet icin)
+
+@program  Example VDP
+@platform hackerone
+@url      https://hackerone.com/example
+@rate     5
+@header   X-HackerOne-Research: kullaniciadin
+@forbid   fuzz
+@note     Programin kurallarini her taramadan once tekrar oku; degisebilir.
 
 [IN]
 example.com

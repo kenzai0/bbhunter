@@ -12,6 +12,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlparse
 
 try:
     import requests
@@ -64,6 +65,8 @@ class Response:
     elapsed: float
     final_url: str
     history: list
+    # Kapsam disi bir adrese yonlendirme engellendiyse o adres (yoksa "")
+    blocked_redirect: str = ""
 
     @property
     def text(self) -> str:
@@ -117,8 +120,6 @@ class HttpClient:
         allow_redirects: bool | None = None,
         **kwargs,
     ) -> Response | None:
-        from urllib.parse import urlparse
-
         host = urlparse(url).hostname or ""
         if not self.scope.in_scope(host):
             raise OutOfScopeError(f"Kapsam disi hedef engellendi: {host} ({url})")
@@ -133,19 +134,49 @@ class HttpClient:
         if allow_redirects is None:
             allow_redirects = self.config.follow_redirects
 
+        # Yonlendirmeler requests'e BIRAKILMAZ: her adimda hedef host yeniden
+        # kapsam kontrolunden gecer. Kapsam disina giden bir yonlendirme
+        # izlenmez; son (3xx) yanit blocked_redirect ile isaretlenip dondurulur.
         sess = self._session()
         start = time.monotonic()
-        try:
-            resp = sess.request(
-                method,
-                url,
-                timeout=self.config.timeout,
-                verify=self.config.verify_tls,
-                allow_redirects=allow_redirects,
-                **kwargs,
-            )
-        except requests.RequestException:
-            return None
+        history: list[int] = []
+        current_url, current_method = url, method.upper()
+        blocked = ""
+        while True:
+            try:
+                resp = sess.request(
+                    current_method,
+                    current_url,
+                    timeout=self.config.timeout,
+                    verify=self.config.verify_tls,
+                    allow_redirects=False,
+                    **kwargs,
+                )
+            except requests.RequestException:
+                return None
+
+            location = resp.headers.get("Location")
+            if not (allow_redirects and resp.is_redirect and location):
+                break
+            if len(history) >= self.config.max_redirects:
+                break
+
+            next_url = urljoin(current_url, location)
+            next_host = urlparse(next_url).hostname or ""
+            if not self.scope.in_scope(next_host):
+                blocked = next_url
+                break
+
+            history.append(resp.status_code)
+            # 303 her zaman, 301/302 ise POST icin GET'e doner (tarayici davranisi)
+            if resp.status_code == 303 or (
+                resp.status_code in (301, 302) and current_method == "POST"
+            ):
+                current_method = "GET"
+                kwargs.pop("data", None)
+                kwargs.pop("json", None)
+            current_url = next_url
+            self.limiter.wait()
         elapsed = time.monotonic() - start
 
         return Response(
@@ -154,8 +185,9 @@ class HttpClient:
             headers=dict(resp.headers),
             body=resp.content or b"",
             elapsed=elapsed,
-            final_url=resp.url,
-            history=[r.status_code for r in resp.history],
+            final_url=current_url,
+            history=history,
+            blocked_redirect=blocked,
         )
 
     def get(self, url: str, **kwargs) -> Response | None:

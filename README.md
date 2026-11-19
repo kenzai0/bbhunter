@@ -21,6 +21,13 @@ not touch the target. As a result, it is hard to touch an unauthorized asset eve
 by accident. The scope is **fail-closed**: if the in-scope list is empty, nothing
 is in scope.
 
+**Redirects are re-checked at every hop.** The HTTP client does not hand redirect
+following to `requests`; it follows each hop itself and re-validates every `Location`
+against the scope. A redirect that points off-scope (e.g. an app bouncing you to an
+external SSO provider) is **not** followed — the 3xx response is returned with its
+target recorded in `Response.blocked_redirect`. This closes the gap where a single
+in-scope entry URL could otherwise drag a request onto an out-of-scope host.
+
 ## Installation
 
 As a package (recommended) — adds the `bbhunter` command to PATH:
@@ -77,6 +84,8 @@ python -m bbhunter full example.com --exclude blog.example.com
 | `takeover` | Detects subdomain-takeover candidates (CNAME + signature) |
 | `probe` | Reflected-parameter probes: XSS candidate, open-redirect, SSRF candidate (non-destructive) |
 | `vuln` | Template-based, non-destructive vulnerability scan |
+| `authz` | Access-control (IDOR) comparison: replays raw requests under your own test accounts and compares the responses |
+| `triage` | Scores stored findings by how reportable they are (filters likely false positives / N/A) |
 | `nuclei-import` | Converts Nuclei YAML templates into the engine's JSON format |
 | `full` | Runs everything in order and produces a report |
 | `report` | Regenerates `report.md` + `report.json` from the SQLite store |
@@ -107,10 +116,13 @@ Under `bbhunter_out/`:
 ```
 bbhunter/
   scope.py          Scope engine (in/out, wildcard, CIDR, fail-closed)
-  http_client.py    Scope-aware, rate-limited HTTP client
+  rules.py          Program rules parsed from the scope file (@rate/@forbid/...)
+  http_client.py    Scope-aware, rate-limited HTTP client (per-hop redirect re-check)
   sources.py        Passive data sources (crt.sh, Wayback) - allowlisted
   config.py         Runtime configuration
   util.py           Logging, parallel execution
+  authz.py          Access-control (IDOR) replay + response comparison
+  triage.py         Scores findings by reportability (false-positive filter)
   recon/
     dns.py          DNS resolution (dnspython optional) + wildcard detection
     subdomains.py   crt.sh passive + DNS brute
@@ -206,6 +218,85 @@ python -m bbhunter probe --scope example.scope
 # on specific URLs
 python -m bbhunter probe 'https://app.example.com/?next=x' --scope example.scope
 ```
+
+## Program rules in the scope file (`@`-lines)
+
+A program's testing rules can live **in the scope file** so the tool enforces them
+for you — no more "I forgot to set the rate limit" or "this program forbids fuzzing".
+Lines starting with `@` are rules:
+
+```
+example.com
+*.api.example.com
+!internal.example.com
+
+@program  Acme VDP
+@platform hackerone
+@rate     5                      # at most 5 requests/sec (global)
+@threads  5                      # at most 5 worker threads
+@header   X-HackerOne-Research: yourusername
+@forbid   fuzz, ports            # stages that must never run
+@note     Account-wide 5 req/s cap for automated scanning.
+```
+
+Rules are applied as the **stricter** side: if the CLI asks for a higher rate than
+`@rate`, it is lowered to the rule, and forbidden stages are skipped with a notice.
+Forbiddable stages: `brute`, `ports`, `fuzz`, `probe`, `vuln`, `takeover`, `js`, and
+`active` (anything that sends a request to the target — passive-only mode). View the
+merged rules any time with `python -m bbhunter scope --scope example.scope`.
+
+## Access-control / IDOR comparison (`authz`)
+
+Replays raw HTTP requests under several identities and compares the responses — the
+Burp "Autorize" idea. The **first** identity owns the request; the others are compared
+against it. If another account's session returns the owner's data, that's an
+**IDOR / broken-access-control candidate**.
+
+> **Use only your own test accounts.** Never use another person's session or data.
+> Requests still pass through the scope engine, and `@forbid active` disables this
+> command entirely. By default only safe methods (GET/HEAD/OPTIONS) are sent;
+> state-changing methods need `--allow-unsafe` and should only touch your own test
+> accounts' data, within the program's rules.
+
+```bash
+# owner.txt / other.txt each hold one header per line, e.g. "Cookie: session=..."
+python -m bbhunter authz \
+  --scope example.scope \
+  --requests ./burp_requests/ \
+  --identity owner:owner.txt \
+  --identity other:other.txt \
+  --identity anon \
+  --marker 'owner@example.com'      # text unique to the owner that must NOT leak
+```
+
+Raw request files are Burp's "Copy to file" output; a single file may hold several
+requests separated by a `======` line. A `bypass?` verdict is **only a candidate** —
+every one must be verified by hand in Burp (an identical page template or public data
+produces false positives). Output: `authz.md` in the out directory.
+
+## Finding triage (`triage`)
+
+Scores the findings already in the store by how reportable they are, so you don't
+waste a report (and your reputation) on a likely N/A. It flags common false positives —
+public API keys, secrets that are really library source, and classes most programs
+mark out of scope (missing security headers, self-XSS, etc.).
+
+```bash
+python -m bbhunter triage --out bbhunter_out --program "Acme VDP"
+```
+
+Output: `triage.md`, with findings grouped as promising / verify / likely-N/A.
+
+## Tests
+
+```bash
+pip install pytest
+python -m pytest -q
+```
+
+The suite uses a local `127.0.0.1` mock server and makes **no** internet requests. It
+covers the scope engine, the per-hop redirect re-check, program rules, triage and the
+access-control comparison.
 
 ## License
 
