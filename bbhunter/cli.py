@@ -40,7 +40,25 @@ def build_scope(args) -> Scope:
     return scope
 
 
-def build_config(args) -> Config:
+def apply_rules(cfg: Config, scope: Scope) -> None:
+    """Program kurallarini konfigurasyona uygular. Kural her zaman daha
+    siki olan taraftir: CLI daha yuksek bir hiz isterse kurala indirilir."""
+    r = scope.rules
+    if r.rate is not None and (cfg.rate_limit <= 0 or cfg.rate_limit > r.rate):
+        warn(f"Program kurali: hiz {cfg.rate_limit:g} -> {r.rate:g} istek/sn'ye indirildi")
+        cfg.rate_limit = r.rate
+    if r.threads is not None and cfg.threads > r.threads:
+        warn(f"Program kurali: threads {cfg.threads} -> {r.threads}'e indirildi")
+        cfg.threads = r.threads
+    for name, val in r.headers.items():
+        if name in cfg.extra_headers and cfg.extra_headers[name] != val:
+            warn(f"Program kurali: '{name}' header'i scope dosyasindaki degerle ezildi")
+        cfg.extra_headers[name] = val
+    if r.forbid:
+        info(f"Program kurali: yasak asamalar -> {', '.join(sorted(r.forbid))}")
+
+
+def build_config(args, scope: Scope | None = None) -> Config:
     cfg = Config()
     cfg.out_dir = Path(args.out)
     cfg.threads = args.threads
@@ -55,6 +73,8 @@ def build_config(args) -> Config:
         if ":" in h:
             name, _, val = h.partition(":")
             cfg.extra_headers[name.strip()] = val.strip()
+    if scope is not None:
+        apply_rules(cfg, scope)
     cfg.ensure_out()
     return cfg
 
@@ -85,7 +105,7 @@ def cmd_scope(args) -> None:
 
 def cmd_recon(args) -> None:
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     domains = scope.filter(args.domains)
@@ -101,7 +121,7 @@ def cmd_recon(args) -> None:
 
 def cmd_discover(args) -> None:
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     domains = scope.filter(args.domains)
@@ -114,7 +134,7 @@ def cmd_discover(args) -> None:
 
 def cmd_vuln(args) -> None:
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     targets = args.targets or [a["value"] for a in store.assets("url")]
@@ -125,7 +145,7 @@ def cmd_vuln(args) -> None:
 
 def cmd_probe(args) -> None:
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     # hedefler: verilen URL'ler veya store'daki parametreli URL'ler
@@ -142,7 +162,7 @@ def cmd_probe(args) -> None:
 
 def cmd_full(args) -> None:
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     domains = scope.filter(args.domains)
@@ -174,13 +194,16 @@ def cmd_takeover(args) -> None:
     from .recon import takeover as m_takeover
 
     scope = build_scope(args)
-    cfg = build_config(args)
+    cfg = build_config(args, scope)
     store = _open_store(cfg)
     pipe = Pipeline(cfg, scope, store)
     hosts = scope.filter(args.hosts) if args.hosts else \
         [a["value"] for a in store.assets("subdomain")]
     if not hosts:
         warn("Host yok. Once 'recon' calistir ya da host(lar) ver.")
+        store.close()
+        return
+    if not pipe._allowed("takeover", "Takeover kontrolu"):
         store.close()
         return
     findings = m_takeover.detect(pipe.client, pipe.resolver, hosts, threads=cfg.threads)
@@ -209,6 +232,95 @@ def cmd_nuclei_import(args) -> None:
         for tid, reason in skipped[:15]:
             info(f"  [{tid}] {reason}")
     good(f"Kullanim: python -m bbhunter vuln <hedef> --templates {out}")
+
+
+def cmd_triage(args) -> None:
+    from . import triage as m_triage
+
+    cfg = Config(out_dir=Path(args.out))
+    if not (cfg.out_dir / "bbhunter.db").exists():
+        err(f"Store bulunamadi: {cfg.out_dir / 'bbhunter.db'}")
+        sys.exit(2)
+    store = _open_store(cfg)
+    findings = store.findings()
+    store.close()
+    path = cfg.out_dir / "triage.md"
+    m_triage.write_markdown(findings, path, program=args.program or "")
+    banner("TRIAGE")
+    counts = {}
+    for f, v in m_triage.triage(findings):
+        counts[v.status] = counts.get(v.status, 0) + 1
+        if v.status in ("promising", "verify"):
+            print(f"  [{m_triage.LABELS[v.status]:>13}] {f['name']} -> {f['target']}")
+    for st, label in m_triage.LABELS.items():
+        if counts.get(st):
+            info(f"{label}: {counts[st]}")
+    good(f"Degerlendirme: {path}")
+
+
+def cmd_authz(args) -> None:
+    from . import authz as m_authz
+    from .http_client import HttpClient
+
+    scope = build_scope(args)
+    cfg = build_config(args, scope)
+
+    # authz hedefe aktif istek atar; '@forbid active' varsa calismamali.
+    if "active" in scope.rules.forbid:
+        err("[kural] Program aktif istekleri yasaklamis (@forbid active); authz calistirilmadi.")
+        sys.exit(2)
+
+    try:
+        identities = [m_authz.load_identity(spec) for spec in args.identity]
+    except (OSError, ValueError) as e:
+        err(f"Kimlik yuklenemedi: {e}")
+        sys.exit(2)
+    if len(identities) < 2:
+        err("En az iki --identity gerekli: once SAHIP, sonra en az bir baska hesap "
+            "(ya da oturumsuz icin 'anon'). Orn: --identity owner:owner.txt --identity other:other.txt")
+        sys.exit(2)
+
+    try:
+        reqs = m_authz.load_requests(args.requests, scheme=args.scheme)
+    except (OSError, ValueError) as e:
+        err(f"Istek dosyasi okunamadi: {e}")
+        sys.exit(2)
+    if not reqs:
+        err("Istek bulunamadi. Burp'ten ham istek dosyasi ver (--requests dosya/dizin).")
+        sys.exit(2)
+
+    # Kapsam disi istekleri onden ayikla ve kullaniciya bildir.
+    in_scope = [r for r in reqs if scope.in_scope(r.url)]
+    if len(in_scope) != len(reqs):
+        for r in reqs:
+            if not scope.in_scope(r.url):
+                warn(f"Kapsam disi, atlandi: {r.method} {r.url} ({r.source})")
+    if not in_scope:
+        err("Verilen isteklerin hicbiri kapsam icinde degil.")
+        sys.exit(2)
+
+    markers = {identities[0].name: list(args.marker)} if args.marker else {}
+
+    client = HttpClient(cfg, scope)
+    banner("ERISIM KONTROLU (AUTHZ)")
+    info(f"Sahip: {identities[0].name} | karsilastirilan: "
+         f"{', '.join(i.name for i in identities[1:])}")
+    if args.allow_unsafe:
+        warn("--allow-unsafe: durum degistiren metotlar da gonderilecek. "
+             "Yalnizca KENDI test hesaplarinin verisinde ve programin izniyle kullan.")
+    results = m_authz.run(client, in_scope, identities, markers=markers,
+                          allow_unsafe=args.allow_unsafe, threshold=args.threshold)
+
+    path = Path(cfg.out_dir) / "authz.md"
+    m_authz.write_markdown(results, path)
+    sus = [r for r in results if r.suspicious]
+    for r in sus:
+        print(f"  [bypass?] {r.request.method} {r.request.url} ({r.request.source})")
+    if sus:
+        warn(f"{len(sus)} supheli aday. HER BIRINI Burp'te elle dogrula (yan yana yanit).")
+    else:
+        good("Supheli (bypass?) aday yok; erisim kontrolu uygulaniyor gorunuyor.")
+    good(f"Rapor: {path}")
 
 
 def cmd_report(args) -> None:
@@ -309,6 +421,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save", default="bbhunter_out/nuclei_templates.json",
                    help="Cikti JSON dosyasi")
     p.set_defaults(func=cmd_nuclei_import)
+
+    p = sub.add_parser("triage", help="Bulgulari raporlanabilirlige gore degerlendir")
+    p.add_argument("--out", default="bbhunter_out")
+    p.add_argument("--program")
+    p.set_defaults(func=cmd_triage)
+
+    p = sub.add_parser(
+        "authz",
+        help="Erisim kontrolu (IDOR) karsilastirmasi: ham istekleri kendi test "
+             "hesaplarinin oturumlariyla tekrar gonderip yanitlari kiyaslar")
+    _add_common(p, with_domains=False)
+    p.add_argument("--requests", nargs="+", required=True, metavar="PATH",
+                   help="Ham HTTP istek dosya(lari) veya dizin(ler) (Burp 'Copy to file'). "
+                        "Bir dosyada '======' ile ayrilmis birden cok istek olabilir")
+    p.add_argument("--identity", action="append", required=True, metavar="AD:DOSYA",
+                   help="Kimlik: 'ad:header_dosyasi' (ILK verilen SAHIP'tir). "
+                        "Oturumsuz icin dosyasiz 'anon'. Tekrarlanabilir")
+    p.add_argument("--marker", action="append", default=[], metavar="METIN",
+                   help="Sahibin yanitina ozgu, baska hesapta GORUNMEMESI gereken metin "
+                        "(orn. sahibin e-postasi). Tekrarlanabilir")
+    p.add_argument("--scheme", default="https", choices=["https", "http"],
+                   help="Ham istekte tam URL yoksa kullanilacak sema")
+    p.add_argument("--threshold", type=float, default=0.9,
+                   help="Sahibin yanitina benzerlik esigi (bu ustu + ayni durum = bypass adayi)")
+    p.add_argument("--allow-unsafe", action="store_true",
+                   help="Durum degistiren metotlari da (POST/PUT/PATCH/DELETE) gonder. "
+                        "YALNIZCA kendi test hesaplarinin verisinde ve programin izniyle")
+    p.set_defaults(func=cmd_authz)
 
     p = sub.add_parser("report", help="Store'dan raporu yeniden uret")
     p.add_argument("--out", default="bbhunter_out")

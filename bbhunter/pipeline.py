@@ -43,6 +43,13 @@ class Pipeline:
         joined = ",".join(sorted(set(domains)))
         return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
 
+    def _allowed(self, stage: str, label: str) -> bool:
+        """Program kurallari bu asamaya izin veriyor mu? Vermiyorsa uyar ve atla."""
+        if self.scope.rules.allows(stage):
+            return True
+        warn(f"[kural] {label} program kurallarinca yasak (@forbid), atlaniyor")
+        return False
+
     def _pending(self, stage: str, sig: str) -> bool:
         """Asama calistirilmali mi? (resume kapali ise her zaman evet)"""
         if self.resume and self.store.is_stage_done(stage, sig):
@@ -64,6 +71,11 @@ class Pipeline:
         probe_only=False,
     ) -> list[m_live.LiveHost]:
         banner("RECON")
+        if not self.scope.rules.allows("live") and not passive_only:
+            warn("[kural] hedefe aktif istek yasak (@forbid active): yalnizca pasif mod")
+            passive_only = True
+        if do_brute and not passive_only and not self._allowed("brute", "Subdomain brute-force"):
+            do_brute = False
         # probe_only: subdomain toplamayi ATLA; store'daki subdomainleri canli-probe et
         if probe_only:
             all_subs = sorted(a["value"] for a in self.store.assets("subdomain"))
@@ -88,7 +100,7 @@ class Pipeline:
                  f"Hedefe hic istek atilmadi (yalnizca crt.sh).")
             return []
 
-        if do_ports:
+        if do_ports and self._allowed("ports", "Port taramasi"):
             # subdomainleri IP'ye cevirip port tara
             hosts = [s for s in all_subs if self.resolver.resolve(s).resolves]
             hp = m_ports.scan(hosts, self.scope, ports=port_list, threads=self.cfg.threads)
@@ -111,8 +123,10 @@ class Pipeline:
             )
 
         # subdomain takeover (TUM subdomainler uzerinde; adaylar genelde "canli" degildir)
-        tos = [] if probe_only else m_takeover.detect(
-            self.client, self.resolver, all_subs, threads=self.cfg.threads)
+        tos = []
+        if not probe_only and self._allowed("takeover", "Takeover kontrolu"):
+            tos = m_takeover.detect(
+                self.client, self.resolver, all_subs, threads=self.cfg.threads)
         for t in tos:
             self.store.add_finding(
                 "subdomain-takeover", f"Subdomain takeover adayi ({t.service})",
@@ -137,18 +151,23 @@ class Pipeline:
 
         # JS analizi (arsivdeki .js; naziklik icin js_limit ile sinirli)
         js_urls = [u for u in archive_urls if u.split("?")[0].endswith(".js")][:js_limit]
-        js_findings = m_js.analyze(self.client, js_urls, threads=self.cfg.threads)
+        js_findings = []
+        if self._allowed("js", "JS analizi"):
+            js_findings = m_js.analyze(self.client, js_urls, threads=self.cfg.threads)
         for jf in js_findings:
             self.store.add_assets("endpoint", jf.endpoints)
             for name, snippet in jf.secrets:
                 self.store.add_finding(
-                    "secret", f"Olasi sir: {name}", "high", jf.source,
+                    "secret", f"Olasi sir: {name}",
+                    m_js.SECRET_SEVERITY.get(name, "medium"), jf.source,
                     detail=snippet, data={"source": jf.source},
                 )
 
         # dizin fuzzing (canli hostlar uzerinde) - opsiyonel (agir olabilir)
         if not do_fuzz:
             dim("Dizin fuzzing atlandi (--no-fuzz).")
+            return
+        if not self._allowed("fuzz", "Dizin fuzzing"):
             return
         banner("DIRECTORY FUZZING")
         for url in live_urls:
@@ -165,6 +184,8 @@ class Pipeline:
 
     def vuln(self, targets: list[str], template_paths=None, min_severity="info") -> None:
         banner("VULN SCAN")
+        if not self._allowed("vuln", "Zafiyet taramasi"):
+            return
         templates = m_vuln.load_templates(template_paths)
         findings = m_vuln.scan(
             self.client, targets, templates,
@@ -180,6 +201,8 @@ class Pipeline:
     def probe(self, param_urls: list[str], *, only_hinted_redirect: bool = True) -> None:
         """Reflected-parametre guvenli problari (XSS adayi, open-redirect, SSRF-aday)."""
         banner("REFLECTED-PARAM PROBE")
+        if not self._allowed("probe", "Reflected-param problari"):
+            return
         param_urls = [u for u in param_urls if "=" in urlparse(u).query]
         if not param_urls:
             dim("Parametreli URL bulunamadi (once discover calistir).")

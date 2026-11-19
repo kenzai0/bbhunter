@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .rules import ProgramRules
+
 
 def _extract_host(entry: str) -> str:
     """Bir girdiden host/domain kismini cikarir (URL ise parse eder)."""
@@ -126,6 +128,7 @@ def _parse_entry(entry: str) -> ScopeRule | None:
 class Scope:
     include: list[ScopeRule] = field(default_factory=list)
     exclude: list[ScopeRule] = field(default_factory=list)
+    rules: ProgramRules = field(default_factory=ProgramRules)
 
     # ---- yukleyiciler ----
     @classmethod
@@ -140,9 +143,11 @@ class Scope:
         Basit scope dosyasi. Satir basi bir girdi.
         '!' ile baslayan satirlar out-of-scope olarak islenir.
         Alternatif: 'IN:' / 'OUT:' basliklari altinda gruplama.
+        '@' ile baslayan satirlar program kuralidir (bkz. rules.py).
         """
         include: list[str] = []
         exclude: list[str] = []
+        rules = ProgramRules()
         mode = "in"
         # utf-8-sig: Windows araclarinin ( or. PowerShell Out-File) ekledigi BOM'u temizler
         for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
@@ -156,11 +161,16 @@ class Scope:
             if low in ("out:", "[out]", "out-of-scope:", "[out-of-scope]"):
                 mode = "out"
                 continue
+            if s.startswith("@"):
+                rules.parse_line(s.split(" #")[0].strip())
+                continue
             if s.startswith("!"):
                 exclude.append(s[1:].strip())
                 continue
             (include if mode == "in" else exclude).append(s)
-        return cls.from_lists(include, exclude)
+        scope = cls.from_lists(include, exclude)
+        scope.rules = rules
+        return scope
 
     # ---- sorgular ----
     def is_excluded(self, target: str) -> bool:
@@ -192,4 +202,4 @@ class Scope:
     def summary(self) -> str:
         inc = ", ".join(r.raw for r in self.include) or "(bos)"
         exc = ", ".join(r.raw for r in self.exclude) or "(yok)"
-        return f"in-scope: {inc}\nout-of-scope: {exc}"
+        return f"in-scope: {inc}\nout-of-scope: {exc}\n{self.rules.summary()}"
